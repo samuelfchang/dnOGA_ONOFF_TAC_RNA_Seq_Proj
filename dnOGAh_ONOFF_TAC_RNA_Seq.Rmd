@@ -1,0 +1,674 @@
+---
+title: "dnOGAh_ONOFF_TAC_RNA_Seq"
+author: "Samuel Chang"
+date: "`r format(Sys.time(), "Last modified: %d %b %Y")`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '5'
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: '5'
+layout: page
+subtitle: Hello
+affiliation: UAB
+editor_options:
+  chunk_output_type: inline
+---
+Description:
+
+Bulk RNA Sequencing of left ventricle mouse tissue from current project via Illumnia NovaSeq 6000 at UAB Helfin Genomics/Sequencing Core
+
+Upstream analysis (followed NF Core's Bulk RNA Seq Pipeline) 1) FastQC (version 0.11.7-Java-1.8.0_74) and MultiQC (version 0.8) 2) STAR alighnment (version 2.7.3a-GCC-6.4.0-2.28) and Salmon Quantification (version 1.8.0-gompi-2020b) 3) MultiQC of all files
+
+Downstream analysis: R version 4.3.1, R-studio version 2024.12.0+467
+
+```{r global-options, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.show='hide', results="hide", warning=FALSE, message=FALSE)
+```
+
+# 1. Setting the Seed:
+```{r}
+set.seed(888)
+# note: setting the seed "fixes" the randomization number generator algorithm, allowing for reproducible randomization every time this code is used (aka fixed randomization)
+```
+
+# 2. Load Libraries:
+```{r}
+# Loading packages via pacman p_load
+basic.packages <- c("dplyr", "tidyr", "openxlsx", "stringr", "ggplot2", "PCAtools", "stringi", "stringr", "httpgd")
+viz.packages <- c("pheatmap", "RColorBrewer", "colorRamps", "ComplexHeatmap")
+gg.packages <- c("ggrepel", "ggpubr", "ggfortify", "gridExtra", "ggbeeswarm", "gplots", "gprofiler2")
+RNAseq.packages <- c("readr", "tximport", "biomaRt", "DESeq2", "vsn", "clusterProfiler", "enrichR", "fgsea", "pathview", "ReactomePA", "circlize", "OneR", "clusterProfiler", "DOSE")
+genome.packages <- c("org.Mm.eg.db", "ensembldb")
+venn.packages <- c("venndir", "eulerr", "corrplot")
+packages <- c(basic.packages, viz.packages, gg.packages, RNAseq.packages, 
+              genome.packages)
+
+install.packages("BiocManager")
+install.packages("pacman")
+pacman::p_load(packages, character.only = TRUE)
+
+```
+
+# 3. Inputs:
+## 3.1 Sample Info:
+```{r}
+sample.data <- read.xlsx("./2_input/Core_Sheet_RNA_Seq_dn_OFF_TAC.xlsx", sheet="R_Analysis")
+
+# dnOGAh ON OFF TAC, relevant sample info for analysis 
+sample.info <- sample.data[,c(1:5)]
+
+sample.info <- sample.info[order(sample.info$Sample.Name),]
+sample.info$Sex <- factor(sample.info$Sex,levels = c("M", "F"))
+sample.info$Genotype <- factor(sample.info$Genotype,levels = c("Con", "ONOFF"))
+sample.info$Intervention <- factor(sample.info$Intervention,levels = c("Sham", "TAC"))
+
+# For doing interactions/grouped analysis, generate groupings of the samples (Group is by experimental condition M+F)
+for (i in 1:40) {
+  sample.info$Group[i] <- paste(sample.info$Genotype[i], sample.info$Intervention[i], sep = "_")
+}
+
+sample.info$Group <- factor(sample.info$Group, levels = c("Con_Sham", "Con_TAC", "ONOFF_Sham", "ONOFF_TAC"))
+
+# Note: Check to make sure counts and sample info files are ordered the same
+```
+
+## 3.2 Annotation Input:
+```{r}
+# Annotation Input
+
+## Generating GeneID annotation df from specific .gff file
+
+### Note organism: Mouse (Mus musculus)
+### Need to download annotation .gff3 file from genecode for specific genome and build used in alignment/quantification
+
+txdb <- makeTxDbFromGFF(file = "./2_input/gencode.vM32.primary_assembly.annotation.gff3")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- select(txdb, k, "GENEID", "TXNAME")
+
+## To get gene symbols to associate with geneID and TXName, maybe do on backend when exporting norm counts sheets
+
+mm39 <- useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl", mirror = "useast")
+bm <- getBM(attributes=c("ensembl_gene_id", "ensembl_gene_id_version", "external_gene_name","entrezgene_id", "entrezgene_description"),  mart=mm39)
+
+```
+
+## 3.3 Quant data import:
+```{r}
+# RNA Seq data input, from salmon quant files
+
+## locate directory with quant files
+dir <- "./2_input/salmonquant_sf/"
+
+## after creating matrix with sample info (above), create named vector pointing to quant files
+files <- file.path(dir, sample.info$Sample.Name, ".sf", fsep = .Platform$r_arch)
+names(files) <- paste0("sample", 1:40)
+all(file.exists(files))
+
+# Running Tximport
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene, importer = read.delim)
+names(txi)
+head(txi$counts)
+
+```
+
+# 4. DDS object via Tximport
+```{r}
+# Running tximport to create dds object 
+ddsTxi <- DESeqDataSetFromTximport(txi,
+                                   colData = sample.info,
+                                   design = ~ Group)
+
+dds_raw <- ddsTxi
+dds_raw@colData@rownames <- sample.info$Sample.Name
+```
+
+
+# 5. Creating/Setting Directories for Output and Results:
+```{r}
+dir.create("./3_output/")
+dir.create("./4_result/")
+dir.create(paste0("./3_output/", "QC_General"))
+dir.create(paste0("./4_result/", "QC_General"))
+dir.create(paste0("./3_output/QC_General/", "QC_General_Raw"))
+dir.create(paste0("./4_result/QC_General/", "QC_General_Raw"))
+dir.create(paste0("./3_output/QC_General/", "QC_General_Filtered"))
+dir.create(paste0("./4_result/QC_General/", "QC_General_Filtered"))
+
+mypathOP <- "./3_output/"
+mypathRes <- "./4_result/"
+study <- "dnOGA_ONOFF_TAC_RNA_2025_analysis_"
+```
+
+# 6. Quality Control/General Data Characterizations:
+## 6.1 Initial QC PCA and MDS and Euclidian distance Heatmaps
+```{r}
+# Setting output and results paths for initial characterizations
+mypathOP = file.path(paste0("./3_output/QC_General/QC_General_Raw/", "/"))
+mypathRes = file.path(paste0("./4_result/QC_General/QC_General_Raw/", "/"))
+
+# Extracting transformed values
+vst <- vst(dds_raw, blind=FALSE)
+
+# Principal component plot of the samples (by Experimental Group)
+pcaData <- plotPCA(vst, intgroup=c("Group"), returnData=TRUE) 
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pcaPlot <- ggplot(pcaData)
+
+# Multidimensional Scaling (MDS) Plot By Euclidean Distance
+
+mdsPlot <- ggplot(mds) 
+
+# Multidimensional Scaling (MDS) Plot By Top Variable Transcripts:
+Ntop <- 1000
+MDS.set <- assay(vst)
+RowVar <- rowVars(assay(vst))
+MDS.set <- as.data.frame(cbind(MDS.set, RowVar))
+MDS_matrix <- MDS.set %>% arrange(desc(RowVar)) %>% top_n(Ntop,RowVar)
+mds <- MDS_matrix %>% dplyr::select(-RowVar) %>% t(.) %>%
+  dist() %>% cmdscale() %>% as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+targets <- as.data.frame(colData(vst))
+targets$SampleName <- rownames(targets)
+rownames(mds) <- targets$SampleName
+mds$SampleName <- rownames(mds)
+mds <- dplyr::inner_join(mds, targets)
+
+mdsPlot <- ggplot(mds)
+
+# Heatmap of Euclidian Distances 
+
+## calculate sample euclidian distances
+sampleDists <- dist(t(assay(vst)))
+
+## plot sample euclidian distances via a heatmap
+sampleDistMatrix <- as.matrix( sampleDists )
+
+## Complex Heatmap annotation labels
+annotation_col<-
+  HeatmapAnnotation(df = data.frame(Group = vst@colData$Group),
+  col = list(Group =
+  c(Con_Sham="orange", Con_TAC="tan", `ONOFF_Sham`="turquoise1", `ONOFF_TAC`="violet")
+  ))
+
+## Heatmap of euclidian distances
+hmp <- ComplexHeatmap::Heatmap(
+      sampleDistMatrix,
+    )
+
+# Plot of counts by gene/sample (see the skew due to many counts < 10 for genes)
+{pdf(file=paste0(mypathRes, study, "MeanSDPlot_VST.pdf"), width=7, height=7)
+meanSdPlot(assay(vst))
+dev.off()
+}
+```
+
+## 6.2 QC Filtering based off intital PCA/MDS plots:
+```{r}
+# Pre-filtering Counts:
+counts_keep <- rowSums(counts(dds_raw)) >=10
+dds <- dds_raw[counts_keep,]
+```
+
+## 6.3 QC and General Characterizations of Data (PCA/MDS/Heatmaps)
+```{r}
+# Setting output and results paths for filtered characterizations
+mypathOP = file.path(paste0("./3_output/QC_General/QC_General_Filtered/", "/"))
+mypathRes = file.path(paste0("./4_result/QC_General/QC_General_Filtered/", "/"))
+
+# Extracting transformed values
+vst <- vst(dds, blind=FALSE)
+
+# Principal component plot of the samples (by Experimental Group, with sample labels)
+pcaData <- plotPCA(vst, intgroup=c("Group"), returnData=TRUE) 
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pcaPlot <- ggplot(pcaData)
+
+# Multidimensional Scaling (MDS) Plot By Euclidean Distance
+
+mdsPlot <- ggplot(mds) 
+
+# Multidimensional Scaling (MDS) Plot By Top Variable Transcripts: (Adapted from Mark's Code)
+Ntop <- 1000
+MDS.set <- assay(vst)
+RowVar <- rowVars(assay(vst))
+MDS.set <- as.data.frame(cbind(MDS.set, RowVar))
+MDS_matrix <- MDS.set %>% arrange(desc(RowVar)) %>% top_n(Ntop,RowVar)
+mds <- MDS_matrix %>% dplyr::select(-RowVar) %>% t(.) %>%
+  dist() %>% cmdscale() %>% as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+targets <- as.data.frame(colData(vst))
+targets$SampleName <- rownames(targets)
+rownames(mds) <- targets$SampleName
+mds$SampleName <- rownames(mds)
+mds <- dplyr::inner_join(mds, targets)
+
+mdsPlot <- ggplot(mds) 
+
+# Heatmap of Euclidian Distances 
+
+## calculate sample euclidian distances
+sampleDists <- dist(t(assay(vst)))
+
+## plot sample euclidian distances via a heatmap
+sampleDistMatrix <- as.matrix( sampleDists )
+
+## Complex Heatmap annotation labels
+annotation_col<-
+  HeatmapAnnotation(df = data.frame(Group = vst@colData$Group),
+  col = list(Group =
+  c(Con_Sham="orange", Con_TAC="tan", `ONOFF_Sham`="turquoise1", `ONOFF_TAC`="violet")
+  ))
+
+## Heatmap of euclidian distances
+hmp <- ComplexHeatmap::Heatmap(
+      sampleDistMatrix
+    )
+
+# Plot of counts by gene/sample (see the skew due to many counts < 10 for genes)
+{pdf(file=paste0(mypathRes, study, "MeanSDPlot_VST.pdf"), width=7, height=7)
+meanSdPlot(assay(vst))
+dev.off()
+}
+```
+
+# 7. Running DESeq2 and Contrast out Comparisons:
+```{r}
+dds_res <- DESeq(dds, test = "Wald", fitType = "parametric", quiet = T)
+
+resultsNames(dds_res)
+
+# Contrast out all results for each comparison (by Group)
+resWald_Group_OFF_TAC_vs_OFF_Sham <- as.data.frame(DESeq2::results(dds_res, contrast = c("Group", "ONOFF_TAC", "ONOFF_Sham")))
+resWald_Group_OFF_TAC_vs_Con_TAC <- as.data.frame(DESeq2::results(dds_res, contrast = c("Group", "ONOFF_TAC", "Con_TAC")))
+resWald_Group_OFF_Sham_vs_Con_Sham <- as.data.frame(DESeq2::results(dds_res, contrast = c("Group", "ONOFF_Sham", "Con_Sham")))
+resWald_Group_Con_TAC_vs_Con_Sham <- as.data.frame(DESeq2::results(dds_res, contrast = c("Group", "Con_TAC", "Con_Sham")))
+resWald_Group_OFF_TAC_vs_Con_Sham <- as.data.frame(DESeq2::results(dds_res, contrast = c("Group", "ONOFF_TAC", "Con_Sham")))
+
+```
+
+# 8. DEG General Characterizations PCA, MDS:
+## 8.1 Creating/Setting Directories for Output and Results:
+```{r}
+dir.create(paste0("./3_output/", "DEG_General"))
+dir.create(paste0("./4_result/", "DEG_General"))
+```
+
+## 8.2 DEG General Characistics PCA, MDS, QC Plots:
+```{r}
+# Setting output and results paths for filtered characterizations
+mypathOP = file.path(paste0("./3_output/DEG_General/", "/"))
+mypathRes = file.path(paste0("./4_result/DEG_General/", "/"))
+
+# Extracting transformed values
+vst <- vst(dds_res, blind=FALSE)
+
+# Principal component plot of the samples (by Experimental Group, with sample labels)
+pcaData <- plotPCA(vst, intgroup=c("Group"), returnData=TRUE) 
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pcaPlot <- ggplot(pcaData) 
+
+# Multidimensional Scaling (MDS) Plot By Euclidean Distance (cloud center label)
+
+mdsPlot <- ggplot(mds) 
+
+# Multidimensional Scaling (MDS) Plot By Top Variable Transcripts: (Adapted from Mark's Code)
+Ntop <- 1000
+MDS.set <- assay(vst)
+RowVar <- rowVars(assay(vst))
+MDS.set <- as.data.frame(cbind(MDS.set, RowVar))
+MDS_matrix <- MDS.set %>% arrange(desc(RowVar)) %>% top_n(Ntop,RowVar)
+mds <- MDS_matrix %>% dplyr::select(-RowVar) %>% t(.) %>%
+  dist() %>% cmdscale() %>% as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+targets <- as.data.frame(colData(vst))
+targets$SampleName <- rownames(targets)
+rownames(mds) <- targets$SampleName
+mds$SampleName <- rownames(mds)
+mds <- dplyr::inner_join(mds, targets)
+
+mdsPlot <- ggplot(mds)
+
+# Heatmap of Euclidian Distances 
+
+## calculate sample euclidian distances
+sampleDists <- dist(t(assay(vst)))
+
+## plot sample euclidian distances via a heatmap
+sampleDistMatrix <- as.matrix( sampleDists )
+
+## Complex Heatmap annotation labels
+annotation_col<-
+  HeatmapAnnotation(df = data.frame(Group = vst@colData$Group),
+  col = list(Group =
+  c(Con_Sham="orange", Con_TAC="tan", `ONOFF_Sham`="turquoise1", `ONOFF_TAC`="violet")
+  ))
+
+## Heatmap of euclidian distances
+hmp <- ComplexHeatmap::Heatmap(
+      sampleDistMatrix
+    )
+
+# Plot of counts by gene/sample (see the skew due to many counts < 10 for genes)
+{
+pdf(file=paste0(mypathRes, study, "MeanSDPlot_VST.pdf"), width=7, height=7)
+meanSdPlot(assay(vst))
+dev.off()
+}
+
+{
+pdf(file=paste0(mypathRes, study, "DispEstPlot.pdf"), width=7, height=7)
+plotDispEsts(dds_res)
+dev.off()
+}
+
+{
+pdf(file=paste0(mypathRes, study, "Outlier.Cooks.Plot.pdf"), width=7, height=7)
+par(mar=c(8,5,2,2))
+boxplot(log10(assays(dds_res)[["cooks"]]), range=0, las=2)
+dev.off()
+}
+```
+
+# 9. Pairwise Comparisons:
+## 9.1 Parameters/Setup for Pariwise Comparisons:
+```{r}
+# Analysis 1: Con.Sham vs. Con.TAC
+# Analysis 2: OFF.Sham vs OFF.TAC 
+# Analysis 3: Con.Sham vs. OFF.Sham
+# Analysis 4: Con.TAC vs. OFF.TAC
+
+# Setting up Analysis: 
+
+## Creating foldernames for each comparison: 
+foldername = c("Con_TAC_vs_Con_Sham", 
+               "ONOFF_TAC_vs_ONOFF_Sham", 
+               "ONOFF_Sham_vs_Con_Sham", 
+               "ONOFF_TAC_vs_Con_TAC",
+               "ONOFF_TAC_vs_Con_Sham"
+               )
+
+## Comparison abreviations for labels
+comparison = c(
+  "resWald_Group_Con_TAC_vs_Con_Sham",
+  "resWald_Group_ONOFF_TAC_vs_ONOFF_Sham",
+  "resWald_Group_ONOFF_Sham_vs_Con_Sham",
+  "resWald_Group_ONOFF_TAC_vs_Con_TAC",
+  "resWald_Group_ONOFF_TAC_vs_Con_Sham"
+)
+
+## For pairwise comparisions:
+phenocoef1 = c(
+  "Con_TAC",
+  "ONOFF_TAC",
+  "ONOFF_Sham",
+  "ONOFF_TAC",
+  "ONOFF_TAC"
+)
+phenocoef2 = c(
+  "Con_Sham",
+  "ONOFF_Sham",
+  "Con_Sham",
+  "Con_TAC",
+  "Con_Sham"
+)
+
+```
+
+## 9.2 Downstream analysis for pairwise comparisons (heatmaps, counts tables, etc):
+```{r}
+# Variable as number of the comparison (after first, continue on through all the comparisons):
+VAR=1
+  
+## Creating Directories for Pairwise Results:
+dir.create(paste0("./3_output/", foldername[VAR]))
+dir.create(paste0("./4_result/", foldername[VAR]))
+
+mypathOP = file.path(paste0("./3_output/", foldername[VAR], "/"))
+mypathRes = file.path(paste0("./4_result/", foldername[VAR], "/"))
+
+# Heatmaps by Euclidean Distance & General DEG by cutoff : 
+## Annotation & Data Filtering
+
+res <- results(dds_res, contrast = c("Group", phenocoef1[VAR], phenocoef2[VAR]))
+
+## Normalized Counts:
+Norm_counts <- counts(dds_res, normalized=T)
+res$ensembl_gene_id <- rownames(res)
+
+## New Results Table with Normalized counts: (not trimmed)
+res_2 <- merge(res, Norm_counts, by=0)
+rownames(res_2) <- res_2$Row.names
+res_2$ensembl_gene_id <- gsub("\\..*","",res_2$ensembl_gene_id)
+res_tmp.0 <- res_2[,c(2:8)]
+res_tmp <- res_2[,c(9:ncol(res_2))]
+res_select <- res_tmp[which(colnames(res_tmp) %in% sample.info$Sample.Name)]
+res_select$ensembl_gene_id <- rownames(res_select)
+res_select$ensembl_gene_id <- gsub("\\..*","",res_select$ensembl_gene_id)
+res_3 <- merge(res_tmp.0, res_select, by="ensembl_gene_id")
+rownames(res_3) <- res_3$ensembl_gene_id
+
+res_annot <- merge(bm, res_3, by=c("ensembl_gene_id")) #%>% mutate_all(na_if,"")
+res_clean <- res_annot[!duplicated(res_annot$ensembl_gene_id),]
+
+## Data table clean-up:
+res_clean$log2FoldChange.ABS <- abs(res_clean$log2FoldChange)
+res_clean$FoldChange.ABS <- 2^(res_clean$log2FoldChange.ABS)
+res_clean$FoldChange <- ifelse(res_clean$log2FoldChange<0,-(res_clean$FoldChange.ABS), 
+                               res_clean$FoldChange.ABS)
+res_clean <- res_clean %>% dplyr::select(-log2FoldChange.ABS, -FoldChange.ABS)
+res_clean <- res_clean %>% relocate(FoldChange, .before = log2FoldChange)
+
+## Heatmap for Differences **probably can use the dplyr data wrangling part to select any "subset" such as just male samples
+hm.df <- res_clean 
+row.names(hm.df) <- res_clean$ensembl_gene_id
+hm <- data.matrix(hm.df%>%dplyr::select(starts_with("dnOGAh-")))
+
+hm_p05 <- dplyr::filter(hm.df, pvalue<0.05)
+row.names(hm_p05) <- hm_p05$ensembl_gene_id
+hm_p05 <- data.matrix(hm_p05%>%dplyr::select(starts_with("dnOGAh-")))
+
+### filtering for all other DEG significance cutoffs done with same code as above, just replace cut offs with desired values
+
+## p-value significant (p<0.05)
+hm_p05.Plot <- pheatmap::pheatmap(mat = hm_p05)
+
+# DEG General Filtering and Count Table (export via excel)
+## Filtering
+res_p05 <- dplyr::filter(res_clean, pvalue<0.05)
+res_p05FC1.5 <- dplyr::filter(res_clean, abs(log2FoldChange)>log2(1.5) & pvalue<0.05)
+res_q0.1 <- dplyr::filter(res_clean, padj<0.1)
+res_q0.1FC1.5 <- dplyr::filter(res_clean, abs(log2FoldChange)>log2(1.5) & padj<0.1)
+res_q0.05 <- dplyr::filter(res_clean, padj<0.05)
+res_q0.05FC1.5 <- dplyr::filter(res_clean, abs(log2FoldChange)>log2(1.5) & padj<0.05)
+res_p05FC1.5.Up <- dplyr::filter(res_p05FC1.5, log2FoldChange > 0)
+res_p05FC1.5.Down <- dplyr::filter(res_p05FC1.5, log2FoldChange < 0)
+res_q0.1FC1.5.Up <- dplyr::filter(res_q0.1FC1.5, log2FoldChange > 0)
+res_q0.1FC1.5.Down <- dplyr::filter(res_q0.1FC1.5, log2FoldChange < 0)
+res_q0.05FC1.5.Up <- dplyr::filter(res_q0.05FC1.5, log2FoldChange > 0)
+res_q0.05FC1.5.Down <- dplyr::filter(res_q0.05FC1.5, log2FoldChange < 0)
+
+## DEG Count Table
+### Count table
+count.table <- res_p05
+count.table$tag.p05 <- "p05"
+count.table$tag.p05FC1.5 <- ifelse(abs(count.table$log2FoldChange)>log2(1.5), "p05.FC1.5", "NS")
+count.table$tag.q0.1 <- ifelse(count.table$padj<0.1, "q0.1", "NS")
+count.table$tag.q0.1FC1.5 <- ifelse(count.table$padj<0.1 & 
+                                      abs(count.table$log2FoldChange)>log2(1.5), "q0.1.FC1.5", "NS")
+count.table$tag.q0.05 <- ifelse(count.table$padj<0.05, "q0.05", "NS")
+count.table$tag.q0.05FC1.5 <- ifelse(count.table$padj<0.05 & 
+                                      abs(count.table$log2FoldChange)>log2(1.5), "q0.05.FC1.5", "NS")
+count.table$tag.PSig <- ifelse(count.table$log2FoldChange>log2(1.5) & 
+                                 count.table$pvalue<0.05, "p05.FC1.5.Up",
+                                        ifelse(count.table$log2FoldChange<(-log2(1.5)) & 
+                                                 count.table$pvalue<0.05, "p05.FC1.5.Down", "NS"))
+count.table$tag.FDRSig01 <- ifelse(count.table$log2FoldChange>log2(1.5) & 
+                                   count.table$padj<0.1, "q0.1.FC1.5.Up",
+                                 ifelse(count.table$log2FoldChange<(-log2(1.5)) & 
+                                   count.table$padj<0.1, "q0.1.FC1.5.Down", "NS"))
+count.table$tag.FDRSig005 <- ifelse(count.table$log2FoldChange>log2(1.5) & 
+                                   count.table$padj<0.05, "q0.05.FC1.5.Up",
+                                 ifelse(count.table$log2FoldChange<(-log2(1.5)) & 
+                                   count.table$padj<0.05, "q0.05.FC1.5.Down", "NS"))
+
+count.table.freq.p05 <- table(count.table$tag.p05)
+count.table.freq.p05.FC1.5 <- table(count.table$tag.p05FC1.5)
+count.table.freq.q0.1 <- table(count.table$tag.q0.1)
+count.table.freq.q0.1.FC1.5 <- table(count.table$tag.q0.1FC1.5)
+count.table.freq.q0.05 <- table(count.table$tag.q0.05)
+count.table.freq.q0.05.FC1.5 <- table(count.table$tag.q0.05FC1.5)
+count.table.freq.PSig <- table(count.table$tag.PSig)
+count.table.freq.FDRSig01 <- table(count.table$tag.FDRSig01)
+count.table.freq.FDRSig005 <- table(count.table$tag.FDRSig005)
+
+
+count.table.compiled <- as.data.frame(rbind(count.table.freq.p05["p05"],
+                                            count.table.freq.p05.FC1.5["p05.FC1.5"],
+                                            count.table.freq.PSig["p05.FC1.5.Up"],
+                                            count.table.freq.PSig["p05.FC1.5.Down"],
+                                            count.table.freq.q0.1["q0.1"],
+                                            count.table.freq.q0.1.FC1.5["q0.1.FC1.5"],
+                                            count.table.freq.FDRSig01["q0.1.FC1.5.Up"],
+                                            count.table.freq.FDRSig01["q0.1.FC1.5.Down"],
+                                            count.table.freq.q0.05["q0.05"],
+                                            count.table.freq.q0.05.FC1.5["q0.05.FC1.5"],
+                                            count.table.freq.FDRSig005["q0.05.FC1.5.Up"],
+                                            count.table.freq.FDRSig005["q0.05.FC1.5.Down"]))
+rownames(count.table.compiled)=c("p<0.05","p<0.05 & |FC|>1.5","p<0.05 & |FC|>1.5 - Up",
+                                 "p<0.05 & |FC|>1.5 - Down", "q<0.1",
+                                 "q<0.1 & |FC|>1.5", "q<0.1 & |FC|>1.5 - Up",
+                                 "q<0.1 & |FC|>1.5 - Down", "q<0.05",
+                                 "q<0.05 & |FC|>1.5", "q<0.05 & |FC|>1.5 - Up",
+                                 "q<0.05 & |FC|>1.5 - Down")
+colnames(count.table.compiled)=c("Frequency")
+count.table.compiled
+
+annoList <- list(res_p05, res_p05FC1.5, res_p05FC1.5.Up, res_p05FC1.5.Down,
+                 res_q0.1, res_q0.1FC1.5, res_q0.1FC1.5.Up, res_q0.1FC1.5.Down, res_q0.05, res_q0.05FC1.5,
+                 res_q0.05FC1.5.Up, res_q0.05FC1.5.Down)
+
+exNA.list <- c()
+for (i in 1:length(annoList)) {
+annGenes <- annoList[[i]]$external_gene_name
+annGenes.exNA <- na.exclude(annGenes)
+annGeneLen <- length(annGenes.exNA)
+exNA.list[i] <- c(annGeneLen)
+}
+
+count.table.compiled_2 <- cbind(count.table.compiled, exNA.list)
+colnames(count.table.compiled_2) <- c("Frequency", "Annotated")
+write.table(count.table.compiled_2, 
+            file = paste0(mypathOP, comparison[VAR],"_", "Count.table.compiled.txt"), 
+            sep = ",", quote = FALSE, row.names = T)
+
+pdf(paste0(mypathRes, comparison[VAR], "_", "Frequency_table.pdf"))
+plot.tmp <- tableGrob(count.table.compiled_2)
+grid.arrange(plot.tmp)
+dev.off()
+
+## Writing Output Excel for DEG
+wb <- createWorkbook()
+ addWorksheet(wb = wb, sheetName = "DEG_NormCounts", gridLines = T)
+ writeData(wb = wb, sheet = 1, x = res_clean)
+ addWorksheet(wb = wb, sheetName = "DEG_p05", gridLines = T)
+ writeData(wb = wb, sheet = 2, x = res_p05)
+ addWorksheet(wb = wb, sheetName = "DEG_p05FC1.5", gridLines = T)
+ writeData(wb = wb, sheet = 3, x = res_p05FC1.5)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.1", gridLines = T)
+ writeData(wb = wb, sheet = 4, x = res_q0.1)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.1FC1.5", gridLines = T)
+ writeData(wb = wb, sheet = 5, x = res_q0.1FC1.5)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.05", gridLines = T)
+ writeData(wb = wb, sheet = 6, x = res_q0.05)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.05FC1.5", gridLines = T)
+ writeData(wb = wb, sheet = 7, x = res_q0.05FC1.5)
+ addWorksheet(wb = wb, sheetName = "DEG_p05FC1.5_Up", gridLines = T)
+ writeData(wb = wb, sheet = 8, x = res_p05FC1.5.Up)
+ addWorksheet(wb = wb, sheetName = "DEG_p05FC1.5_Down", gridLines = T)
+ writeData(wb = wb, sheet = 9, x = res_p05FC1.5.Down)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.1FC1.5_Up", gridLines = T)
+ writeData(wb = wb, sheet = 10, x = res_q0.1FC1.5.Up)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.1FC1.5_Down", gridLines = T)
+ writeData(wb = wb, sheet = 11, x = res_q0.1FC1.5.Down)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.05FC1.5_Up", gridLines = T)
+ writeData(wb = wb, sheet = 12, x = res_q0.05FC1.5.Up)
+ addWorksheet(wb = wb, sheetName = "DEG_q0.05FC1.5_Down", gridLines = T)
+ writeData(wb = wb, sheet = 13, x = res_q0.05FC1.5.Down)
+ worksheetOrder(wb)
+ names(wb)
+ saveWorkbook(wb, paste0(mypathOP, comparison[VAR], "_", "DEG_Complete.xlsx"), 
+              overwrite = TRUE)
+ 
+ 
+# Volcano Plots
+## Adapted from https://www.biostars.org/p/282295/
+## Standard Color: NS="grey30", FCSig="forestgreen", PSig="royalblue", FC_PSig="red2"
+
+volcanotable <- res_clean
+volcanotable <- volcanotable[!duplicated(volcanotable$ensembl_gene_id),]
+rownames(volcanotable) <- volcanotable$ensembl_gene_id
+volcanotable <- volcanotable[!(is.na(volcanotable$log2FoldChange)) & !(is.na(volcanotable$pvalue)) &
+                               !(is.na(volcanotable$padj)),]
+FCCutoff = 0.585 #log2(1.5)
+PCutoff = 0.05
+
+volcanotable$Significance <- "NS"
+volcanotable$Significance[(abs(volcanotable$log2FoldChange) > FCCutoff)] <- "FCSig"
+volcanotable$Significance[(volcanotable$pvalue<PCutoff)] <- "PSig"
+volcanotable$Significance[(volcanotable$pvalue<PCutoff) & (abs(volcanotable$log2FoldChange)>FCCutoff)] <- "FC_PSig"
+table(volcanotable$Significance)
+volcanotable$Significance <- factor(volcanotable$Significance, levels=c("NS", "FCSig", "PSig", "FC_PSig"))
+volcano.color <- c(NS="#C0C0C0", FCSig="black", PSig="#0000FF", FC_PSig="red2")
+xmax <- max(abs(volcanotable$log2FoldChange), na.rm=T)
+ymax <- max(-log10(volcanotable$pvalue), na.rm=T)
+
+# Top PSig Genes
+Ptop <- data.frame(volcanotable %>% subset(pvalue<PCutoff & abs(log2FoldChange)>FCCutoff))
+Ptop$AbsFC <- abs(Ptop$log2FoldChange) 
+Ptop <- Ptop %>% arrange(desc(AbsFC))
+rownames(Ptop) <- Ptop$ensembl_gene_id
+
+Volcano.PSig <- ggplot(volcanotable, aes(x=log2FoldChange, y=-log10(pvalue))) +
+  geom_point(aes(color=factor(Significance)), alpha=1/2, size=0.8) + theme_bw(base_size=24) + 
+  scale_color_manual(values=volcano.color, labels=c(NS="NS", FCSig=paste("LogFC>|", FCCutoff, "|", sep=""), 
+                              PSig=paste("P-value P<", PCutoff, sep=""), 
+                              FC_PSig=paste("P-value P<", PCutoff, " & LogFC>|", FCCutoff, "|", sep=""))) +
+  theme(legend.background=element_rect(), plot.title=element_text(angle=0, size=12, face="bold", vjust=1),
+        panel.grid.major=element_blank(), panel.grid.minor=element_blank(),
+        axis.text.x=element_text(angle=0, size=12, vjust=1),
+        axis.text.y=element_text(angle=0, size=12, vjust=1),
+        axis.title=element_text(size=12),
+        legend.position="top", legend.key=element_blank(), 
+        legend.key.size=unit(0.5, "cm"), legend.text=element_text(size=8),
+        title=element_text(size=8), legend.title=element_blank()) + 
+  guides(colour = guide_legend(override.aes=list(size=2.5))) + 
+  scale_x_continuous(limits = c(-xmax,xmax)) + scale_y_continuous(limits = c(0,ymax)) +
+  xlab(bquote(~Log[2]~ "fold change")) + ylab(bquote(~-Log[10]~ italic(P))) +
+  ggtitle(paste0(comparison[VAR], "_", "Volcano Plot", sep="")) +
+  geom_vline(xintercept=c(-FCCutoff, FCCutoff), linetype="longdash", colour="black", size=0.4) +
+  geom_hline(yintercept=-log10(PCutoff), linetype="longdash", colour="black", size=0.4) 
+
+ggsave(Volcano.PSig, path=mypathRes, 
+       filename=paste0(comparison[VAR], "_", "Volcano.Plot_PSig_Unlabeled.pdf"), 
+       width = 7, height = 8, dpi=600)
+ 
+## Like above, code for p < 0.05 modified for any DEG sig cut off needed
+
+# Reset WD
+setwd("../../")
+```
+
+# 10. Session Info:
+```{r}
+Sys.TD <- Sys.time()
+Sys.TD <- gsub("-", ".", Sys.TD) 
+Sys.TD <- gsub(" ", "_", Sys.TD) 
+Sys.TD <- gsub(":", ".", Sys.TD)
+writeLines(capture.output(sessionInfo()), paste0(Sys.TD,"_SessionInfo.txt"))
+```
