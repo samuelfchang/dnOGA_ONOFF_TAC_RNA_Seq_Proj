@@ -11,7 +11,7 @@ output:
     toc_float: true
     toc_depth: '5'
 layout: page
-subtitle: Hello
+subtitle: See Description
 affiliation: UAB
 editor_options:
   chunk_output_type: inline
