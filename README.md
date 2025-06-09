@@ -1,9 +1,9 @@
 # dnOGA_ONOFF_TAC_RNA_Seq_Proj
  Bulk RNA Seq for dnOGAh ONOFF TAC Project in Wende Lab
  
-Associated with manuscript: *will insert here
+Associated with manuscript: *under review*, biorxiv: https://doi.org/10.1101/2025.06.04.657956
 
-NCBI GEO Accession Number: *will insert here
+Associated NCBI GEO Accession Number: GSE298401
  
 Contact: sfchang@uab.edu or adamwende@uabmc.edu
 
