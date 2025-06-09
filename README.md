@@ -18,4 +18,4 @@ Upstream analysis (following NF Core's Bulk RNA Seq Pipeline):
 
 Downstream analysis: R version 4.3.1, R-studio version 2024.12.0+467
 
-Last updated: 2025/05/27
+Last updated: 2025/06/09
