@@ -1,7 +1,7 @@
 # dnOGA_ONOFF_TAC_RNA_Seq_Proj
  Bulk RNA Seq for dnOGAh ONOFF TAC Project in Wende Lab
  
-Associated with manuscript: *under review*, biorxiv: https://doi.org/10.1101/2025.06.04.657956
+Associated with manuscript: 10.1161/JAHA.125.044089
 
 Associated NCBI GEO Accession Number: GSE298401
  
@@ -18,4 +18,4 @@ Upstream analysis (following NF Core's Bulk RNA Seq Pipeline):
 
 Downstream analysis: R version 4.3.1, R-studio version 2024.12.0+467
 
-Last updated: 2025/06/09
+Last updated: 2026/06/12
